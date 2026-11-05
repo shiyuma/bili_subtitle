@@ -1,0 +1,4 @@
+interface:
+  display_name: "B站字幕与视频总结"
+  short_description: "提取 B 站视频字幕，筛除串台轨道并生成带分 P 时间戳的总结"
+  default_prompt: "用 $bilibili-subtitle-summary 总结这个 B 站视频，标出关键时间点。"
