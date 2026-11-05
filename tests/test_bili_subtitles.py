@@ -37,10 +37,11 @@ def ok(data):
 class FakeHTTP:
     """Mock the HTTPS transport while exercising real URL building and JSON parsing."""
 
-    def __init__(self, *, rounds=None, downloads=None, login_gate=False):
+    def __init__(self, *, rounds=None, downloads=None, login_gate=False, nav=None):
         self.rounds = rounds or {}
         self.downloads = downloads or {}
         self.login_gate = login_gate
+        self.nav = nav
         self.calls = []
 
     def open(self, request, *, timeout):
@@ -61,6 +62,10 @@ class FakeHTTP:
                 {"page": 1, "cid": 101, "part": "土壤", "duration": 100},
                 {"page": 2, "cid": 202, "part": "浇水", "duration": 200},
             ]})
+        elif parts.path == "/x/web-interface/nav":
+            if self.nav is None:
+                raise AssertionError("an ordinary subtitle result must not probe account status")
+            value = self.nav
         elif parts.path in {"/x/player/v2", "/x/player/wbi/v2"}:
             rows = self.rounds[int(query["cid"][0])].pop(0)
             value = {"code": rows} if isinstance(rows, int) else ok({
@@ -146,6 +151,36 @@ class SkillTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(page["status"], "login_required_or_expired")
         self.assertEqual(page["rounds_attempted"], 1)
+        self.assertEqual(report["login_source"], "anonymous")
+
+    def test_player_login_gate_checks_account_before_recommending_rescan(self):
+        for player_response, nav, check, expected in (
+                ([], ok({"isLogin": True}), "valid", "access_unavailable_with_valid_login"),
+                (-101, {"code": -101}, "expired", "login_required_or_expired"),
+                ([], {"code": -352}, "unverified", "login_status_unverified")):
+            with self.subTest(check=check):
+                fake = FakeHTTP(rounds={101: [player_response]}, login_gate=True, nav=nav)
+                code, report, _, _ = self.cli_fetch(fake, BVID, "--rounds", "1", cookie="fake-session")
+                self.assertEqual(code, 2)
+                self.assertEqual(report["login_check"], check)
+                self.assertEqual(report["pages"][0]["status"], expected)
+                calls = [r for r in fake.calls if "/x/web-interface/nav" in r.full_url]
+                self.assertEqual(len(calls), 1)
+                self.assertIn("SESSDATA=fake-session", calls[0].get_header("Cookie"))
+
+    def test_empty_subtitles_with_saved_login_do_not_signal_expiry(self):
+        fake = FakeHTTP(rounds={101: [[]]})
+        with tempfile.TemporaryDirectory() as temp, contextlib.redirect_stdout(io.StringIO()), \
+             patch.dict(os.environ, {"XDG_CONFIG_HOME": temp, "BILIBILI_SESSDATA": ""}), \
+             patch.object(bili, "build_opener", return_value=fake):
+            bili.store_sessdata(bili.login_path(), "fake-session")
+            output = Path(temp) / "result"
+            self.assertEqual(bili.main(["fetch", BVID, "--rounds", "1", "--out", str(output)]), 2)
+            self.assertTrue(bili.login_path().is_file())
+            report = json.loads((output / "report.json").read_text())
+            self.assertEqual(report["login_source"], "saved")
+            self.assertNotIn("login_check", report)
+            self.assertEqual(report["pages"][0]["status"], "no_tracks_observed")
 
     def test_risk_control_stops_remaining_rounds_and_pages(self):
         fake = FakeHTTP(rounds={101: [[], -352]})
@@ -177,9 +212,9 @@ class SkillTest(unittest.TestCase):
                 path.write_text("test-value%2C0", encoding="utf-8")
                 path.chmod(0o644)
                 with self.assertRaisesRegex(bili.Problem, "file_permissions"):
-                    bili.read_sessdata(path)
+                    bili.load_login(path)
                 path.chmod(0o600)
-                self.assertEqual(bili.read_sessdata(path), "test-value%2C0")
+                self.assertEqual(bili.load_login(path), ("test-value%2C0", "file"))
 
 
 if __name__ == "__main__":

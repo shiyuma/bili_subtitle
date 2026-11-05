@@ -8,10 +8,10 @@
 login_dir="$(mktemp -d)"
 python3 -m venv "$login_dir/venv"
 "$login_dir/venv/bin/python" -m pip install -r requirements-qr.txt
-"$login_dir/venv/bin/python" scripts/bili_subtitles.py qr-login --image "$login_dir/bilibili-login.png" --sessdata-file "$login_dir/sessdata"
+"$login_dir/venv/bin/python" scripts/bili_subtitles.py qr-login --image "$login_dir/bilibili-login.png"
 ```
 
-在 Codex 中，由助手准备依赖和临时目录，让 `qr-login` 在后台运行并保留工具的进程会话。命令会在轮询前输出 PNG 的绝对路径；拿到路径就在对话中用图片方式显示（本地 Markdown 图片用 `![B 站登录二维码](/绝对路径/bilibili-login.png)`），请用户用哔哩哔哩 App 扫码并在手机上确认。不要打开浏览器，不要打印二维码原始链接、扫码密钥或响应内容。扫码后用同一个 `--sessdata-file` 继续 `fetch`；全部抓完后删除临时凭据和二维码。二维码通常约 3 分钟失效；若超时，请重新生成，不能使用旧图继续。
+在 Codex 中，由助手准备依赖和临时目录，让 `qr-login` 在后台运行并保留工具的进程会话。命令会在轮询前输出 PNG 的绝对路径；拿到路径就在对话中用图片方式显示（本地 Markdown 图片用 `![B 站登录二维码](/绝对路径/bilibili-login.png)`），请用户用哔哩哔哩 App 扫码并在手机上确认。不要打开浏览器，不要打印二维码原始链接、扫码密钥或响应内容。确认后直接运行 `fetch`，它会自动读取[本机登录态](#手动配置登录态)。只清理临时二维码和用不到的工作文件；保留默认登录文件，跨进程和对话复用。二维码通常约 3 分钟失效，这与扫码成功后的账号登录态有效期无关。
 
 脚本先 GET `https://passport.bilibili.com/x/passport-login/web/qrcode/generate`，再约每 3 秒 GET 同路径下的 `poll?qrcode_key=...`。外层 `code` 表示接口请求状态，内层 `data.code` 表示扫码状态：86101 未扫码，86090 已扫码待确认，86038 过期，0 已确认。确认后只从响应的 `Set-Cookie` 读取 GET 字幕所需的 `SESSDATA`，不访问回跳地址，不保存刷新令牌或其他 Cookie。若官方接口连接失败，不能生成可扫描的二维码。
 
@@ -25,7 +25,7 @@ python3 -m venv "$login_dir/venv"
 python3 scripts/bili_subtitles.py login
 ```
 
-粘贴到不回显的提示符。默认保存在 `~/.config/bilibili-subtitle-summary/sessdata`（支持 `XDG_CONFIG_HOME`），文件权限为 0600。重新运行可更新；删除该文件可清除本地登录态。若环境已提供 `BILIBILI_SESSDATA`，脚本优先使用该变量；也可以用 `fetch --sessdata-file /本机私有路径` 显式指定文件，覆盖变量和默认路径。不要使用命令行参数、聊天、日志或仓库存放 Cookie 值。
+粘贴到不回显的提示符。扫码与手动登录默认都保存在 `~/.config/bilibili-subtitle-summary/sessdata`（支持 `XDG_CONFIG_HOME`），文件权限为 0600；这个路径在 Skill 安装目录之外，更新 Skill 后仍能复用。重新登录可更新；删除该文件可清除本地登录态。`fetch` 的读取顺序是显式 `--sessdata-file`、非空的 `BILIBILI_SESSDATA`、默认本机文件；若手动设置的凭据失效，要更新对应来源，或取消覆盖后再用默认扫码。不要使用命令行参数、聊天、日志或仓库存放 Cookie 值。
 
 脚本尽力先访问主页取得 `buvid3`，没有拿到也继续。只向 `api.bilibili.com` 发送登录 Cookie；短链、主页和字幕 CDN 请求均不带登录 Cookie。
 
@@ -41,7 +41,8 @@ python3 scripts/bili_subtitles.py login
 ## 排查
 
 - `needs_content_review`：有通过时长校验的候选，按样本和正文继续核对。请求因限流中途停止时仍可能已有候选，见 `stop_reason`。
-- `login_required_or_expired`：检查本机登录态。匿名且接口明确要求登录时提前结束该 P；已配置但仍提示时，重新扫码，并确认账号有权观看该视频。
+- `login_required_or_expired`：播放器明确提示登录且没有配置登录态，或 B 站账号状态接口确认凭据失效。报告的 `login_source` 标记使用的来源；已有凭据时仅在这类登录提示后查询账号状态，不在每次抓取前查询。
+- `access_unavailable_with_valid_login` / `login_status_unverified`：B 站确认已登录但视频或字幕仍不可用，或账号状态暂时无法核实。保留现有登录态，不触发重新扫码。
 - `no_tracks_observed`：在采样窗口内没见到轨道，可能尚未生成、暂时未返回或视频没有字幕。可先在网页播放器确认。
 - `no_eligible_candidate`：查看每条轨的 `status`、`coverage`（比例，1.0 为 100%）、`cue_count`、`download_error` 或 `reason`。如只有其他语言且用户允许，使用 `--fallback-language`。
 - `request_stopped` / `not_attempted`：查看平台拒绝或限流状态，停止自动重试。若只是旧播放器端点不可用（例如 404）且没有限流，可另用 `--player wbi` 试 `/x/player/wbi/v2`。该选项走常见的无签名请求；如果平台要求 WBI 签名，当前脚本会报告失败，不会自动改签名、切换账号或重试绕过限制。

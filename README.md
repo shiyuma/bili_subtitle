@@ -20,7 +20,7 @@ git clone https://github.com/shiyuma/bili_subtitle.git "$skills_dir/bilibili-sub
 
 只给链接或 BV 号时，默认直接给带时间戳的总结。Skill 会从字幕判断视频在做什么：访谈抓问题和观点，科普抓机制和证据，故事抓事件和转折，教程抓步骤和易错点。只想拿文件时，直接说「只要 SRT」或「只要纯文字稿」。
 
-需要登录时，Codex 可以[直接在对话中显示二维码](references/bilibili-api.md#扫码登录)。用哔哩哔哩 App 扫码确认后即可继续抓取。
+需要登录时，Codex 可以[直接在对话中显示二维码](references/bilibili-api.md#扫码登录)。用哔哩哔哩 App 扫码确认一次，同一台设备上的后续对话会复用本机登录态；B 站确认登录态失效后再扫码。
 
 通过 Git 安装的版本可以用 `git -C "$skills_dir/bilibili-subtitle-summary" pull --ff-only` 更新（在同一个终端，或重新设置 `skills_dir`）。
 
@@ -35,7 +35,7 @@ python3 scripts/bili_subtitles.py fetch '<视频链接或 BV 号>' --out "$run_d
 
 默认使用 URL 中的 `?p=N` 或 P1。指定多个 P 可用 `--page 2 --page 4`，整个视频用 `--all-pages`。每 P 默认采样 12 轮；`--rounds 3` 可快速试跑，但更容易漏掉轨道。
 
-若返回 `login_required_or_expired`，按[扫码步骤](references/bilibili-api.md#扫码登录)登录后，把凭据文件作为 `--sessdata-file` 传给 `fetch`。
+若返回 `login_required_or_expired`，按[扫码步骤](references/bilibili-api.md#扫码登录)登录后，直接重跑 `fetch`，换一个新的 `--out` 目录即可。
 
 打开输出目录的 `report.json`，检查候选的首、中、尾样本及 cue 数量。确认内容后，把报告中的候选文件路径传给：
 

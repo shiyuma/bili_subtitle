@@ -48,21 +48,23 @@ class FakePassport:
 
 class QrLoginTest(unittest.TestCase):
     def login(self, path, passport):
-        image, credential = path / "bilibili-login.png", path / "sessdata"
+        image = path / "bilibili-login.png"
         with contextlib.redirect_stdout(io.StringIO()) as stdout, \
              contextlib.redirect_stderr(io.StringIO()) as stderr, \
              patch.object(bili, "build_opener", return_value=passport), \
              patch.object(bili.time, "sleep") as sleep, \
+             patch.dict(os.environ, {"XDG_CONFIG_HOME": str(path)}), \
              patch.object(bili, "write_qr_png"), patch.dict(sys.modules, {"segno": object()}):
-            result = bili.main(["qr-login", "--image", str(image), "--sessdata-file", str(credential)])
+            result = bili.main(["qr-login", "--image", str(image)])
         output = stdout.getvalue() + stderr.getvalue()
         for secret in (KEY, FAKE_COOKIE, "must-not-store", "must-not-follow"):
             self.assertNotIn(secret, output)
         self.assertTrue(all(request.get_header("Cookie") is None for request in passport.requests))
         return result, output, sleep.call_count
 
-    def test_mobile_confirmation_then_authenticated_subtitles(self):
-        with tempfile.TemporaryDirectory() as directory:
+    def test_mobile_confirmation_reused_by_separate_fetches(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ, {"XDG_CONFIG_HOME": directory, "BILIBILI_SESSDATA": ""}):
             path = Path(directory)
             passport = FakePassport([86101, 86090, 0], cookie=FAKE_COOKIE)
             result, output, waits = self.login(path, passport)
@@ -71,17 +73,20 @@ class QrLoginTest(unittest.TestCase):
             self.assertIn("已扫码，等待在手机上确认", output)
             self.assertIn("扫码登录成功", output)
             self.assertEqual(len(passport.requests), 4)
-            self.assertEqual((path / "sessdata").read_text().strip(), FAKE_COOKIE)
+            credential = bili.login_path()
+            self.assertEqual(credential.read_text().strip(), FAKE_COOKIE)
             if os.name == "posix":
-                self.assertEqual((path / "sessdata").stat().st_mode & 0o777, 0o600)
-            fake = FakeHTTP(rounds={101: [[track("valid")]]}, downloads={("valid", "a"): transcript(100)})
-            with contextlib.redirect_stdout(io.StringIO()), patch.object(bili, "build_opener", return_value=fake):
-                fetch = bili.main(["fetch", BVID, "--rounds", "1", "--out", str(path / "result"),
-                                   "--sessdata-file", str(path / "sessdata")])
-            self.assertEqual(fetch, 0)
-            player = [request for request in fake.calls if "/x/player/" in request.full_url]
-            self.assertEqual(player[0].get_header("Cookie"), f"SESSDATA={FAKE_COOKIE}; buvid3=fake-device")
-            self.assertEqual(len(list((path / "result").glob("candidates/*/*.json"))), 1)
+                self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(credential.parent.stat().st_mode & 0o777, 0o700)
+            for bvid in (BVID, "BV1111111111"):
+                result_path = path / bvid
+                fake = FakeHTTP(rounds={101: [[track("valid")]]}, downloads={("valid", "a"): transcript(100)})
+                with contextlib.redirect_stdout(io.StringIO()), patch.object(bili, "build_opener", return_value=fake):
+                    fetch = bili.main(["fetch", bvid, "--rounds", "1", "--out", str(result_path)])
+                self.assertEqual(fetch, 0)
+                player = [request for request in fake.calls if "/x/player/" in request.full_url]
+                self.assertEqual(player[0].get_header("Cookie"), f"SESSDATA={FAKE_COOKIE}; buvid3=fake-device")
+                self.assertEqual(len(list(result_path.glob("candidates/*/*.json"))), 1)
 
     def test_expired_or_missing_cookie_is_not_login_success(self):
         for status, reason in ((86038, "qr_expired"), (0, "qr_confirmed_without_sessdata")):
@@ -90,7 +95,7 @@ class QrLoginTest(unittest.TestCase):
                 result, output, _ = self.login(path, FakePassport([status]))
                 self.assertEqual(result, 1)
                 self.assertIn(reason, output)
-                self.assertFalse((path / "sessdata").exists())
+                self.assertFalse((path / "bilibili-subtitle-summary" / "sessdata").exists())
 
     def test_connection_reset_during_generation_does_not_offer_a_qr(self):
         with tempfile.TemporaryDirectory() as directory:

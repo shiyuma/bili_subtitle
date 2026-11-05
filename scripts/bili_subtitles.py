@@ -26,6 +26,7 @@ QR_API = f"https://{PASSPORT_HOST}/x/passport-login/web/qrcode"
 QR_SCAN_PATHS = {PASSPORT_HOST: "/h5-app/passport/login/scan",
                  "account.bilibili.com": "/h5/account-h5/auth/scan-web"}
 QR_TTL, QR_POLL_INTERVAL = 180, 3
+LOGIN_ERRORS = {"api_-101", "http_401"}
 VIDEO_HOSTS = {"www.bilibili.com", "bilibili.com", "m.bilibili.com"}
 SHORT_HOST = "b23.tv"
 SUBTITLE_HOSTS = {"aisubtitle.hdslb.com", "subtitle.bilibili.com", "i0.hdslb.com",
@@ -90,20 +91,20 @@ def checked_cookie(value):
     return value
 
 
-def read_sessdata(explicit_file):
+def load_login(explicit_file):
     if explicit_file is None and os.environ.get("BILIBILI_SESSDATA"):
-        return checked_cookie(os.environ["BILIBILI_SESSDATA"])
+        return checked_cookie(os.environ["BILIBILI_SESSDATA"]), "environment"
     file = explicit_file or login_path()
     try:
         if not file.is_file():
             if explicit_file is None and not file.exists():
-                return ""
+                return "", "anonymous"
             raise Problem("sessdata_file_not_found_or_not_regular")
         with file.open(encoding="utf-8") as handle:
             info = os.fstat(handle.fileno())
             if os.name == "posix" and (info.st_uid != os.getuid() or info.st_mode & 0o077):
                 raise Problem("sessdata_file_permissions: file must belong to you and use chmod 600")
-            return checked_cookie(handle.read(4097).strip())
+            return checked_cookie(handle.read(4097).strip()), "file" if explicit_file else "saved"
     except (OSError, UnicodeError):
         raise Problem("cannot_read_sessdata_file") from None
 
@@ -117,7 +118,7 @@ def save_login(path):
 
 def store_sessdata(path, value):
     value = checked_cookie(value)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", encoding="utf-8", delete=False) as f:
@@ -244,6 +245,19 @@ class Client:
 
     def metadata(self, bvid):
         return self.api("/x/web-interface/view", {"bvid": bvid})
+
+    def login_check(self):
+        try:
+            nav = self.api("/x/web-interface/nav", {})
+        except Problem as exc:
+            # Treat an explicit not-logged-in response as conclusive, not a
+            # transport error, rate limit, or ambiguous HTTP denial.
+            return "expired" if str(exc) == "api_-101" else "unverified"
+        if nav.get("isLogin") is True:
+            return "valid"
+        if nav.get("isLogin") is False:
+            return "expired"
+        return "unverified"
 
     def player(self, bvid, cid):
         if self.last_player is not None:
@@ -525,7 +539,7 @@ def collect_page(client, bvid, page, out, *, rounds, lang, fallback):
                         key=preference)
     if candidates:
         status = "needs_content_review"
-    elif stopped in {"api_-101", "http_401"} or (login_rounds and empty_rounds == attempted):
+    elif stopped in LOGIN_ERRORS or (login_rounds and empty_rounds == attempted):
         status = "login_required_or_expired"
     elif stopped:
         status = "request_stopped"
@@ -543,15 +557,27 @@ def collect_page(client, bvid, page, out, *, rounds, lang, fallback):
             "candidate_order": [track["id"] for track in candidates], "tracks": list(tracks.values())}
 
 
+def login_issue(check):
+    return {"valid": "access_unavailable_with_valid_login",
+            "unverified": "login_status_unverified"}.get(check, "login_required_or_expired")
+
+
 def fetch(args):
     if not 1 <= args.rounds <= 12 or not 2 <= args.interval <= 60:
         raise Problem("use 1–12 rounds and an interval of 2–60 seconds")
     if args.out.exists():
         raise Problem("output_directory_already_exists: use a new path")
-    client = Client(read_sessdata(args.sessdata_file), args.interval, args.player)
+    sessdata, login_source = load_login(args.sessdata_file)
+    client = Client(sessdata, args.interval, args.player)
     bvid, url_page = client.video(args.source)
     client.warm_up()
-    metadata = client.metadata(bvid)
+    try:
+        metadata = client.metadata(bvid)
+    except Problem as exc:
+        if str(exc) not in LOGIN_ERRORS:
+            raise
+        check = client.login_check() if sessdata else None
+        raise Problem(f"{login_issue(check)}: metadata {exc}, login_source={login_source}") from None
     pages = video_pages(metadata)
     requested = (sorted(pages) if args.all_pages else
                  list(dict.fromkeys(args.page or [url_page or 1])))
@@ -564,7 +590,7 @@ def fetch(args):
               if isinstance(metadata.get("owner"), dict) else "",
               "available_pages": sorted(pages), "requested_pages": requested,
               "requested_language": args.lang, "allow_language_fallback": args.fallback_language,
-              "player_endpoint": client.endpoint, "pages": []}
+              "player_endpoint": client.endpoint, "login_source": login_source, "pages": []}
     manifest = args.out / "report.json"
     stopped = None
     for index in requested:
@@ -575,6 +601,14 @@ def fetch(args):
                                 lang=args.lang, fallback=args.fallback_language)
             stopped = page["stop_reason"]
         report["pages"].append(page)
+        write_json(manifest, report)
+    gated = [page for page in report["pages"] if page["status"] == "login_required_or_expired"]
+    if sessdata and gated:
+        # Probe only after a login-specific signal, and never during a rate limit.
+        check = "unverified" if stopped and stopped not in LOGIN_ERRORS else client.login_check()
+        report["login_check"] = check
+        for page in gated:
+            page["status"] = login_issue(check)
         write_json(manifest, report)
     print(manifest)
     return 0 if all(p["status"] == "needs_content_review" for p in report["pages"]) else 2
@@ -626,7 +660,7 @@ def main(argv=None):
     login.add_argument("--sessdata-file", type=Path)
     qr = sub.add_parser("qr-login", help="write a Bilibili login QR PNG and wait for confirmation")
     qr.add_argument("--image", type=Path, required=True, help="new PNG path for the QR code")
-    qr.add_argument("--sessdata-file", type=Path, help="private file for the resulting login state")
+    qr.add_argument("--sessdata-file", type=Path, help="override the persistent local login file")
     export = sub.add_parser("render", help="format the chosen candidate without contacting Bilibili")
     export.add_argument("candidate", type=Path)
     export.add_argument("--format", choices=("timed", "text", "srt"), default="timed")
