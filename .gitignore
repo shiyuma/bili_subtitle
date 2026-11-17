@@ -8,3 +8,12 @@ cookies.txt
 report.json
 candidates/
 *.srt
+*.safetensors
+ggml-*.bin
+*.wav
+*.m4a
+*.mp3
+*.mp4
+*.aiff
+.venv/
+asr-engine

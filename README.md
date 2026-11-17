@@ -22,6 +22,8 @@ git clone https://github.com/shiyuma/bili_subtitle.git "$skills_dir/bilibili-sub
 
 需要登录时，Codex 可以[直接在对话中显示二维码](references/bilibili-api.md#扫码登录)。用哔哩哔哩 App 扫码确认一次，同一台设备上的后续对话会复用本机登录态；B 站确认登录态失效后再扫码。
 
+没有可靠字幕时可以[用本地模型生成时间戳字幕](references/local-asr.md)。首次使用由用户选一种模型并下载，之后复用；能正常拿到字幕时无需安装。音频在本机处理。
+
 通过 Git 安装的版本可以用 `git -C "$skills_dir/bilibili-subtitle-summary" pull --ff-only` 更新（在同一个终端，或重新设置 `skills_dir`）。
 
 ## 命令行
